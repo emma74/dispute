@@ -1,0 +1,258 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Dispute purge Lambda deployment with dev/prod mappings
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+
+Mappings:
+  EnvironmentConfig:
+    dev:
+      LambdaCodeBucket: forte-devops
+      LambdaCodeKey: dispute-purge/dev/deployment.zip
+      SourceBucketName: fortedisputes-testlan
+      AuditBucketName: forte-purge-audit-logs-dev
+      SecretId: dev/sqlserver/dispute-purge
+      CutoffDate: "2019-05-01"
+      DryRun: "true"
+      LambdaSubnetId: subnet-0ea7b5824b8a93b50
+      LambdaSecurityGroupId: sg-be9f94da
+      ScheduleExpression: cron(0 6 1 * ? *)
+      ScheduleState: ENABLED
+
+    prod:
+      LambdaCodeBucket: forte-devops
+      LambdaCodeKey: dispute-purge/prod/deployment.zip
+      SourceBucketName: fortedisputes-prod
+      AuditBucketName: forte-purge-audit-logs-prod
+      SecretId: prod/sqlserver/dispute-purge
+      CutoffDate: "2019-05-01"
+      DryRun: "false"
+      LambdaSubnetId: subnet-0ea7b5824b8a93b50
+      LambdaSecurityGroupId: sg-be9f94da
+      ScheduleExpression: cron(0 6 1 * ? *)
+      ScheduleState: ENABLED
+
+Resources:
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::FindInMap:
+          - EnvironmentConfig
+          - Ref: EnvironmentName
+          - AuditBucketName
+
+  DisputePurgeLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: dispute-purge-lambda-role-${EnvironmentName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName:
+            Fn::Sub: dispute-purge-lambda-policy-${EnvironmentName}
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+              - Sid: LambdaVpcNetworking
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:AssignPrivateIpAddresses
+                  - ec2:UnassignPrivateIpAddresses
+                Resource: "*"
+
+              - Sid: ReadSourceBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  Fn::Sub:
+                    - arn:aws:s3:::${BucketName}
+                    - BucketName:
+                        Fn::FindInMap:
+                          - EnvironmentConfig
+                          - Ref: EnvironmentName
+                          - SourceBucketName
+
+              - Sid: DeleteSourceObjects
+                Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                Resource:
+                  Fn::Sub:
+                    - arn:aws:s3:::${BucketName}/*
+                    - BucketName:
+                        Fn::FindInMap:
+                          - EnvironmentConfig
+                          - Ref: EnvironmentName
+                          - SourceBucketName
+
+              - Sid: WriteAuditLogs
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource:
+                  Fn::Sub:
+                    - arn:aws:s3:::${BucketName}/*
+                    - BucketName:
+                        Fn::FindInMap:
+                          - EnvironmentConfig
+                          - Ref: EnvironmentName
+                          - AuditBucketName
+
+              - Sid: ReadDbSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  Fn::Sub:
+                    - arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretName}*
+                    - SecretName:
+                        Fn::FindInMap:
+                          - EnvironmentConfig
+                          - Ref: EnvironmentName
+                          - SecretId
+
+  DisputePurgeLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: dispute-purge-lambda-${EnvironmentName}
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role:
+        Fn::GetAtt:
+          - DisputePurgeLambdaRole
+          - Arn
+      Timeout: 900
+      MemorySize: 1024
+      Architectures:
+        - x86_64
+      Code:
+        S3Bucket:
+          Fn::FindInMap:
+            - EnvironmentConfig
+            - Ref: EnvironmentName
+            - LambdaCodeBucket
+        S3Key:
+          Fn::FindInMap:
+            - EnvironmentConfig
+            - Ref: EnvironmentName
+            - LambdaCodeKey
+      VpcConfig:
+        SubnetIds:
+          - Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - LambdaSubnetId
+        SecurityGroupIds:
+          - Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - LambdaSecurityGroupId
+      Environment:
+        Variables:
+          ENVIRONMENT:
+            Ref: EnvironmentName
+          BUCKET_NAME:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - SourceBucketName
+          AUDIT_BUCKET:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - AuditBucketName
+          SECRET_ID:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - SecretId
+          CUTOFF_DATE:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - CutoffDate
+          DRY_RUN:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - DryRun
+
+  DisputePurgeScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name:
+        Fn::Sub: dispute-purge-schedule-${EnvironmentName}
+      Description:
+        Fn::Sub: Runs dispute purge Lambda for ${EnvironmentName}
+      State:
+        Fn::FindInMap:
+          - EnvironmentConfig
+          - Ref: EnvironmentName
+          - ScheduleState
+      ScheduleExpression:
+        Fn::FindInMap:
+          - EnvironmentConfig
+          - Ref: EnvironmentName
+          - ScheduleExpression
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - DisputePurgeLambdaFunction
+              - Arn
+          Id: DisputePurgeLambdaTarget
+
+  AllowEventBridgeInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: DisputePurgeLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+          - DisputePurgeScheduleRule
+          - Arn
+
+Outputs:
+  Environment:
+    Value:
+      Ref: EnvironmentName
+
+  LambdaName:
+    Value:
+      Ref: DisputePurgeLambdaFunction
+
+  AuditBucketName:
+    Value:
+      Ref: AuditBucket
+
+  ScheduleRuleName:
+    Value:
+      Ref: DisputePurgeScheduleRule

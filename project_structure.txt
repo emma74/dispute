@@ -1,0 +1,15 @@
+dispute-purge-lambda/
+│
+├── lambda_function.py          # entry point (lambda_handler only)
+├── config.py                  # constants (bucket names, cutoff, flags)
+│
+├── services/
+│   ├── db_service.py          # SQL Server + secrets + queries
+│   ├── s3_service.py          # S3 list/delete logic
+│   ├── audit_service.py      # audit upload
+│
+├── utils/
+│   ├── logger.py              # logging setup
+│
+├── requirements.txt
+└── README.md
