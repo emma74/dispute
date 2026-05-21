@@ -1,0 +1,66 @@
+Deployment Steps
+
+1. Project roots. Should have the following
+cd dispute-purge
+
+config.py
+lambda_function.py
+requirements.txt
+template.yaml
+services/
+utils/
+
+2. Clean old build(s) if existent and build dependencies for Lambda python 3.12. Create folder package
+rm -rf package deployment.zip
+
+docker run --rm -v "$(pwd)":/app -w /app python:3.12 bash -c "mkdir -p package && pip install --no-cache-dir -r requirements.txt -t package"
+
+3. Copy code into package folder
+cp lambda_function.py config.py package/
+cp -r services package/
+cp -r utils package/
+
+4. Create zip file
+cd package
+zip -r ../deployment.zip .
+cd ..
+
+5. Verify zip structure
+unzip -l deployment.zip | grep lambda_function.py
+
+//should show
+lambda_function.py
+
+6. Verify pymssql matches python 3.12
+unzip -l deployment.zip | grep _pymssql
+
+//should show
+_pymssql.cpython-312-x86_64-linux-gnu.so
+
+7. Upload zip to s3
+aws s3 cp deployment.zip \
+s3://forte-devops/dispute-purge/dev/deployment.zip   
+
+8. validate template
+aws cloudformation validate-template --template-body file://template.yaml
+
+9. Deploy template
+aws cloudformation deploy \
+  --template-file template.yaml \
+  --stack-name dispute-purge-dev \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides EnvironmentName=dev
+  
+10. Test lambda
+aws lambda invoke \
+  --function-name dispute-purge-lambda-dev \
+  --payload '{}' \
+  response.json
+
+cat response.json
+
+11. check logs
+aws logs tail /aws/lambda/dispute-purge-lambda-dev --since 10m
+
+12. After stack creation, get SG Id for Lambda SG, go to db SG, add rule to allow
+TCP 1433 from Lambda SG
