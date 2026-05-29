@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Dispute purge Lambda SAM deployment
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+
+Mappings:
+  EnvironmentConfig:
+    dev:
+      SourceBucketName: fortedisputes-testlan
+      AuditBucketName: forte-purge-audit-logs-dev
+      SecretId: dev/sqlserver/dispute-purge
+      CutoffDate: "2019-05-01"
+      DryRun: "true"
+      VpcId: vpc-61e2fdf04
+      SubnetId: subnet-0ea7b5824b8a93b50
+      ScheduleExpression: cron(0 6 1 * ? *)
+
+    prod:
+      SourceBucketName: fortedisputes-prod
+      AuditBucketName: forte-purge-audit-logs-prod
+      SecretId: prod/sqlserver/dispute-purge
+      CutoffDate: "2019-05-01"
+      DryRun: "false"
+      VpcId: vpc-61e2fdf04
+      SubnetId: subnet-0ea7b5824b8a93b50
+      ScheduleExpression: cron(0 6 1 * ? *)
+
+Resources:
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::FindInMap:
+          - EnvironmentConfig
+          - Ref: EnvironmentName
+          - AuditBucketName
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription:
+        Fn::Sub: Lambda security group for dispute purge ${EnvironmentName}
+      VpcId:
+        Fn::FindInMap:
+          - EnvironmentConfig
+          - Ref: EnvironmentName
+          - VpcId
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: dispute-purge-lambda-sg-${EnvironmentName}
+
+  DisputePurgeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: dispute-purge-lambda-${EnvironmentName}
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      CodeUri: .
+      Timeout: 900
+      MemorySize: 1024
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SubnetIds:
+          - Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - SubnetId
+        SecurityGroupIds:
+          - Ref: LambdaSecurityGroup
+      Environment:
+        Variables:
+          ENVIRONMENT:
+            Ref: EnvironmentName
+          BUCKET_NAME:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - SourceBucketName
+          AUDIT_BUCKET:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - AuditBucketName
+          SECRET_ID:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - SecretId
+          CUTOFF_DATE:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - CutoffDate
+          DRY_RUN:
+            Fn::FindInMap:
+              - EnvironmentConfig
+              - Ref: EnvironmentName
+              - DryRun
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - Statement:
+            - Sid: ReadSourceBucket
+              Effect: Allow
+              Action:
+                - s3:ListBucket
+              Resource:
+                Fn::Sub:
+                  - arn:aws:s3:::${BucketName}
+                  - BucketName:
+                      Fn::FindInMap:
+                        - EnvironmentConfig
+                        - Ref: EnvironmentName
+                        - SourceBucketName
+
+            - Sid: DeleteSourceObjects
+              Effect: Allow
+              Action:
+                - s3:DeleteObject
+              Resource:
+                Fn::Sub:
+                  - arn:aws:s3:::${BucketName}/*
+                  - BucketName:
+                      Fn::FindInMap:
+                        - EnvironmentConfig
+                        - Ref: EnvironmentName
+                        - SourceBucketName
+
+            - Sid: WriteAuditLogs
+              Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource:
+                Fn::Sub:
+                  - arn:aws:s3:::${BucketName}/*
+                  - BucketName:
+                      Fn::FindInMap:
+                        - EnvironmentConfig
+                        - Ref: EnvironmentName
+                        - AuditBucketName
+
+            - Sid: ReadDbSecret
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                Fn::Sub:
+                  - arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretName}*
+                  - SecretName:
+                      Fn::FindInMap:
+                        - EnvironmentConfig
+                        - Ref: EnvironmentName
+                        - SecretId
+
+      Events:
+        MonthlySchedule:
+          Type: Schedule
+          Properties:
+            Schedule:
+              Fn::FindInMap:
+                - EnvironmentConfig
+                - Ref: EnvironmentName
+                - ScheduleExpression
+            Enabled: true
+
+Outputs:
+  Environment:
+    Value:
+      Ref: EnvironmentName
+
+  LambdaName:
+    Value:
+      Ref: DisputePurgeFunction
+
+  LambdaSecurityGroupId:
+    Value:
+      Ref: LambdaSecurityGroup
+
+  AuditBucketName:
+    Value:
+      Ref: AuditBucket
